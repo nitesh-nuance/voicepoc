@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Azure Communication Services - Server Required</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 80vh;
+        }
+        
+        .container {
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            padding: 40px;
+            text-align: center;
+        }
+        
+        .error-box {
+            background: #ffebee;
+            border: 2px solid #f44336;
+            padding: 20px;
+            border-radius: 8px;
+            margin: 20px 0;
+        }
+        
+        .solution-box {
+            background: #e8f5e8;
+            border: 2px solid #4caf50;
+            padding: 20px;
+            border-radius: 8px;
+            margin: 20px 0;
+            text-align: left;
+        }
+        
+        code {
+            background: #f5f5f5;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-family: 'Courier New', monospace;
+        }
+        
+        .big-button {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 15px 30px;
+            border-radius: 8px;
+            font-size: 18px;
+            cursor: pointer;
+            margin: 10px;
+            text-decoration: none;
+            display: inline-block;
+        }
+        
+        .big-button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚀 Azure Communication Services Test Client</h1>
+        
+        <div class="error-box">
+            <h2>⚠️ Server Required</h2>
+            <p>The test client cannot load properly when opened directly as a file. This is due to CORS (Cross-Origin Resource Sharing) restrictions.</p>
+        </div>
+        
+        <div class="solution-box">
+            <h3>🔧 Quick Fix - Choose ONE:</h3>
+            
+            <h4>Option 1: VS Code Live Server (Easiest)</h4>
+            <ol>
+                <li>In VS Code Explorer, right-click on <code>test-client-local-server.html</code></li>
+                <li>Select <strong>"Open with Live Server"</strong></li>
+                <li>The test client will open automatically in your browser</li>
+            </ol>
+            
+            <h4>Option 2: Run the Batch File</h4>
+            <ol>
+                <li>Double-click <code>start-test-client.bat</code> in this folder</li>
+                <li>A command window will open and start a local server</li>
+                <li>Open the URL shown in the command window</li>
+            </ol>
+            
+            <h4>Option 3: Manual Command</h4>
+            <p>Open PowerShell in this directory and run:</p>
+            <code>python -m http.server 8000</code>
+            <p>Then open: <code>http://localhost:8000/test-client-local-server.html</code></p>
+        </div>
+        
+        <div style="margin: 30px 0;">
+            <a href="#" onclick="tryAutoDetect()" class="big-button">🔄 Try Auto-Detection</a>
+            <a href="test-client-local-server.html" class="big-button">⚠️ Try Anyway (May Not Work)</a>
+        </div>
+        
+        <div id="result" style="margin-top: 20px;"></div>
+    </div>
+    
+    <script>
+        function tryAutoDetect() {
+            const resultDiv = document.getElementById('result');
+            
+            // Check if we're running from a server
+            if (location.protocol === 'file:') {
+                resultDiv.innerHTML = `
+                    <div class="error-box">
+                        <strong>❌ Still running from file://</strong><br>
+                        Please use one of the solutions above.
+                    </div>
+                `;
+            } else {
+                resultDiv.innerHTML = `
+                    <div class="solution-box">
+                        <strong>✅ Great! Running from ${location.protocol}</strong><br>
+                        <a href="test-client-local-server.html" class="big-button">🚀 Open Test Client</a>
+                    </div>
+                `;
+            }
+        }
+        
+        // Auto-check on page load
+        window.addEventListener('load', () => {
+            if (location.protocol !== 'file:') {
+                document.getElementById('result').innerHTML = `
+                    <div class="solution-box">
+                        <strong>✅ Perfect! Server detected.</strong><br>
+                        <a href="test-client-local-server.html" class="big-button">🚀 Open Test Client</a>
+                    </div>
+                `;
+            }
+        });
+    </script>
+</body>
+</html>
