@@ -1,0 +1,15 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_WORKER_RUNTIME": "python",
+    "ACS_CONNECTION_STRING": "endpoint=https://YOUR-ACS-RESOURCE-NAME.communication.azure.com/;accesskey=YOUR_ACS_ACCESS_KEY_HERE",
+    "ACS_PHONE_NUMBER": "+1234567890",
+    "TARGET_USER_ID": "8:acs:YOUR-ACS-USER-ID-HERE",
+    "COGNITIVE_SERVICES_ENDPOINT": "https://YOUR-COGNITIVE-SERVICES-NAME.cognitiveservices.azure.com/",
+    "CALLBACK_URL_BASE": "YOUR-FUNCTION-APP-NAME.azurewebsites.net",
+    "COSMOS_CONNECTION_STRING": "AccountEndpoint=https://YOUR-COSMOS-DB-NAME.documents.azure.com:443/;AccountKey=YOUR_COSMOS_DB_KEY_HERE;",
+    "WELCOME_MESSAGE": "Hello! This is your Azure Communication Services assistant.",
+    "TTS_VOICE": "en-US-JennyNeural"
+  }
+}

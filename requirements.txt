@@ -5,3 +5,4 @@
 azure-functions
 azure-communication-callautomation
 azure-communication-identity
+azure-cosmos

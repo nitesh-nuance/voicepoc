@@ -2,6 +2,10 @@ import azure.functions as func
 import logging
 import os
 import json
+import base64
+import time
+import threading
+from typing import Optional, Any, Dict, List, Union
 
 # Load local.settings.json for development (when not running in Azure Functions runtime)
 def load_local_settings():
@@ -25,18 +29,28 @@ load_local_settings()
 from azure.communication.callautomation import CallAutomationClient, TextSource
 from azure.communication.identity import CommunicationUserIdentifier
 
+# Azure Cosmos DB imports
+from azure.cosmos import CosmosClient, PartitionKey
+from azure.cosmos.exceptions import CosmosResourceExistsError, CosmosResourceNotFoundError
+
 # Your connection string from ACS, stored securely
-ACS_CONNECTION_STRING = os.environ.get("ACS_CONNECTION_STRING", "endpoint=https://healthcareagent-comms.unitedstates.communication.azure.com/;accesskey=FfQcj4nwjlzvM5sMwxzw0le8473TMsywMGLgomBcDtCvoDfONAbUJQQJ99BGACULyCpYBcwtAAAAAZCS3t8U")
+ACS_CONNECTION_STRING = os.environ.get("ACS_CONNECTION_STRING", "")
 
 # Cognitive Services endpoint for TTS functionality (required for media operations)
 # For Global ACS resources, use a global or US endpoint
-COGNITIVE_SERVICES_ENDPOINT = os.environ.get("COGNITIVE_SERVICES_ENDPOINT", "https://healthcareagent-cognitiveserv-ng.cognitiveservices.azure.com/").rstrip('/')
+COGNITIVE_SERVICES_ENDPOINT = os.environ.get("COGNITIVE_SERVICES_ENDPOINT", "").rstrip('/') if os.environ.get("COGNITIVE_SERVICES_ENDPOINT") else ""
  
 # The User Identity you generated (the one starting with 8:acs:...)
-TARGET_USER_ID = os.environ.get("TARGET_USER_ID", "8:acs:a40c5c9d-178f-4629-b90d-4c48e852facf_00000028-7088-6a5f-6a0b-343a0d004313")
+TARGET_USER_ID = os.environ.get("TARGET_USER_ID", "")
  
 # The callback URL for your function, so ACS can send back events
-CALLBACK_URL_BASE = os.environ.get("CALLBACK_URL_BASE", "healthcareagent-functions-ng1.azurewebsites.net")
+CALLBACK_URL_BASE = os.environ.get("CALLBACK_URL_BASE", "")
+
+# Azure Cosmos DB configuration
+COSMOS_CONNECTION_STRING = os.environ.get("COSMOS_CONNECTION_STRING", "")
+COSMOS_DATABASE_NAME = "adherenceagentdb"
+COSMOS_PATIENTS_CONTAINER = "patients"
+COSMOS_APPOINTMENTS_CONTAINER = "appointments"
 
 # The message to play when call connects - customize this as needed
 WELCOME_MESSAGE = os.environ.get("WELCOME_MESSAGE", 
@@ -50,6 +64,233 @@ TTS_VOICE = os.environ.get("TTS_VOICE", "en-US-JennyNeural")
 # Temporary variables for webhook-based custom TTS (in production, use proper storage)
 TEMP_CUSTOM_MESSAGE = None
 TEMP_CUSTOM_VOICE = None
+
+# Cosmos DB Manager Class
+class CosmosDBManager:
+    """
+    Azure Cosmos DB manager for healthcare application
+    Handles patient and appointment data with proper error handling and retry logic
+    """
+    
+    def __init__(self):
+        """Initialize Cosmos DB client with connection string"""
+        if not COSMOS_CONNECTION_STRING:
+            logging.warning("COSMOS_CONNECTION_STRING not configured")
+            self.client = None
+            self.database = None
+            self.patients_container = None
+            self.appointments_container = None
+            return
+            
+        try:
+            self.client = CosmosClient.from_connection_string(COSMOS_CONNECTION_STRING)
+            self.database = self.client.get_database_client(COSMOS_DATABASE_NAME)
+            self.patients_container = self.database.get_container_client(COSMOS_PATIENTS_CONTAINER)
+            self.appointments_container = self.database.get_container_client(COSMOS_APPOINTMENTS_CONTAINER)
+            logging.info("CosmosDB client initialized successfully")
+        except Exception as e:
+            logging.error(f"Failed to initialize CosmosDB client: {str(e)}")
+            self.client = None
+            self.database = None
+            self.patients_container = None
+            self.appointments_container = None
+    
+    def is_connected(self) -> bool:
+        """Check if Cosmos DB is properly connected"""
+        return self.client is not None
+    
+    # Patient Management Methods
+    async def create_patient(self, patient_data: dict) -> dict:
+        """Create a new patient record"""
+        if not self.is_connected():
+            raise Exception("Cosmos DB not connected")
+        
+        try:
+            # Ensure required fields
+            if 'id' not in patient_data:
+                patient_data['id'] = patient_data.get('patientId', str(int(time.time())))
+            if 'patientId' not in patient_data:
+                patient_data['patientId'] = patient_data['id']
+                
+            # Add metadata
+            patient_data['createdAt'] = int(time.time())
+            patient_data['updatedAt'] = int(time.time())
+            
+            response = self.patients_container.create_item(body=patient_data)
+            logging.info(f"Patient created successfully: {patient_data['id']}")
+            return response
+        except CosmosResourceExistsError:
+            raise Exception(f"Patient with ID {patient_data['id']} already exists")
+        except Exception as e:
+            logging.error(f"Error creating patient: {str(e)}")
+            raise Exception(f"Failed to create patient: {str(e)}")
+    
+    async def get_patient(self, patient_id: str) -> dict:
+        """Get a patient by ID"""
+        if not self.is_connected():
+            raise Exception("Cosmos DB not connected")
+        
+        try:
+            response = self.patients_container.read_item(item=patient_id, partition_key=patient_id)
+            logging.info(f"Patient retrieved successfully: {patient_id}")
+            return response
+        except CosmosResourceNotFoundError:
+            raise Exception(f"Patient with ID {patient_id} not found")
+        except Exception as e:
+            logging.error(f"Error retrieving patient: {str(e)}")
+            raise Exception(f"Failed to retrieve patient: {str(e)}")
+    
+    async def update_patient(self, patient_id: str, updates: dict) -> dict:
+        """Update an existing patient record"""
+        if not self.is_connected():
+            raise Exception("Cosmos DB not connected")
+        
+        try:
+            # First get the existing patient
+            existing_patient = await self.get_patient(patient_id)
+            
+            # Update fields
+            existing_patient.update(updates)
+            existing_patient['updatedAt'] = int(time.time())
+            
+            response = self.patients_container.replace_item(item=patient_id, body=existing_patient)
+            logging.info(f"Patient updated successfully: {patient_id}")
+            return response
+        except Exception as e:
+            logging.error(f"Error updating patient: {str(e)}")
+            raise Exception(f"Failed to update patient: {str(e)}")
+    
+    async def delete_patient(self, patient_id: str) -> bool:
+        """Delete a patient record"""
+        if not self.is_connected():
+            raise Exception("Cosmos DB not connected")
+        
+        try:
+            self.patients_container.delete_item(item=patient_id, partition_key=patient_id)
+            logging.info(f"Patient deleted successfully: {patient_id}")
+            return True
+        except CosmosResourceNotFoundError:
+            raise Exception(f"Patient with ID {patient_id} not found")
+        except Exception as e:
+            logging.error(f"Error deleting patient: {str(e)}")
+            raise Exception(f"Failed to delete patient: {str(e)}")
+    
+    async def list_patients(self, limit: int = 100) -> list:
+        """List all patients with optional limit"""
+        if not self.is_connected():
+            raise Exception("Cosmos DB not connected")
+        
+        try:
+            query = "SELECT * FROM c ORDER BY c.createdAt DESC"
+            items = list(self.patients_container.query_items(
+                query=query,
+                max_item_count=limit,
+                enable_cross_partition_query=True
+            ))
+            logging.info(f"Retrieved {len(items)} patients")
+            return items
+        except Exception as e:
+            logging.error(f"Error listing patients: {str(e)}")
+            raise Exception(f"Failed to list patients: {str(e)}")
+    
+    # Appointment Management Methods
+    async def create_appointment(self, appointment_data: dict) -> dict:
+        """Create a new appointment record"""
+        if not self.is_connected():
+            raise Exception("Cosmos DB not connected")
+        
+        try:
+            # Ensure required fields
+            if 'id' not in appointment_data:
+                appointment_data['id'] = str(int(time.time() * 1000))  # Unique ID
+            if 'patientId' not in appointment_data:
+                raise Exception("patientId is required for appointments")
+                
+            # Add metadata
+            appointment_data['createdAt'] = int(time.time())
+            appointment_data['updatedAt'] = int(time.time())
+            
+            response = self.appointments_container.create_item(body=appointment_data)
+            logging.info(f"Appointment created successfully: {appointment_data['id']}")
+            return response
+        except CosmosResourceExistsError:
+            raise Exception(f"Appointment with ID {appointment_data['id']} already exists")
+        except Exception as e:
+            logging.error(f"Error creating appointment: {str(e)}")
+            raise Exception(f"Failed to create appointment: {str(e)}")
+    
+    async def get_appointment(self, appointment_id: str, patient_id: str) -> dict:
+        """Get an appointment by ID"""
+        if not self.is_connected():
+            raise Exception("Cosmos DB not connected")
+        
+        try:
+            response = self.appointments_container.read_item(item=appointment_id, partition_key=patient_id)
+            logging.info(f"Appointment retrieved successfully: {appointment_id}")
+            return response
+        except CosmosResourceNotFoundError:
+            raise Exception(f"Appointment with ID {appointment_id} not found")
+        except Exception as e:
+            logging.error(f"Error retrieving appointment: {str(e)}")
+            raise Exception(f"Failed to retrieve appointment: {str(e)}")
+    
+    async def list_appointments_for_patient(self, patient_id: str) -> list:
+        """List all appointments for a specific patient"""
+        if not self.is_connected():
+            raise Exception("Cosmos DB not connected")
+        
+        try:
+            query = "SELECT * FROM c WHERE c.patientId = @patientId ORDER BY c.appointmentDate ASC"
+            parameters = [{"name": "@patientId", "value": patient_id}]
+            
+            items = list(self.appointments_container.query_items(
+                query=query,
+                parameters=parameters,
+                partition_key=patient_id
+            ))
+            logging.info(f"Retrieved {len(items)} appointments for patient {patient_id}")
+            return items
+        except Exception as e:
+            logging.error(f"Error listing appointments: {str(e)}")
+            raise Exception(f"Failed to list appointments: {str(e)}")
+    
+    async def update_appointment(self, appointment_id: str, patient_id: str, updates: dict) -> dict:
+        """Update an existing appointment record"""
+        if not self.is_connected():
+            raise Exception("Cosmos DB not connected")
+        
+        try:
+            # First get the existing appointment
+            existing_appointment = await self.get_appointment(appointment_id, patient_id)
+            
+            # Update fields
+            existing_appointment.update(updates)
+            existing_appointment['updatedAt'] = int(time.time())
+            
+            response = self.appointments_container.replace_item(item=appointment_id, body=existing_appointment)
+            logging.info(f"Appointment updated successfully: {appointment_id}")
+            return response
+        except Exception as e:
+            logging.error(f"Error updating appointment: {str(e)}")
+            raise Exception(f"Failed to update appointment: {str(e)}")
+    
+    async def delete_appointment(self, appointment_id: str, patient_id: str) -> bool:
+        """Delete an appointment record"""
+        if not self.is_connected():
+            raise Exception("Cosmos DB not connected")
+        
+        try:
+            self.appointments_container.delete_item(item=appointment_id, partition_key=patient_id)
+            logging.info(f"Appointment deleted successfully: {appointment_id}")
+            return True
+        except CosmosResourceNotFoundError:
+            raise Exception(f"Appointment with ID {appointment_id} not found")
+        except Exception as e:
+            logging.error(f"Error deleting appointment: {str(e)}")
+            raise Exception(f"Failed to delete appointment: {str(e)}")
+
+# Initialize global Cosmos DB manager
+cosmos_manager = CosmosDBManager()
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
 
@@ -134,7 +375,7 @@ def GetToken(req: func.HttpRequest) -> func.HttpResponse:
     
     try:
         # Get connection string
-        connection_string = os.environ.get("ACS_CONNECTION_STRING", "endpoint=https://healthcareagent-comms.unitedstates.communication.azure.com/;accesskey=FfQcj4nwjlzvM5sMwxzw0le8473TMsywMGLgomBcDtCvoDfONAbUJQQJ99BGACULyCpYBcwtAAAAAZCS3t8U")
+        connection_string = os.environ.get("ACS_CONNECTION_STRING", "")
         if not connection_string:
             logging.error("ACS_CONNECTION_STRING not found in environment")
             return func.HttpResponse(
@@ -160,7 +401,7 @@ def GetToken(req: func.HttpRequest) -> func.HttpResponse:
         
         # If no specific user ID provided, use the default from environment
         if not user_id:
-            user_id = os.environ.get("TARGET_USER_ID", "8:acs:a40c5c9d-178f-4629-b90d-4c48e852facf_00000028-7088-6a5f-6a0b-343a0d004313")
+            user_id = os.environ.get("TARGET_USER_ID", "")
         
         if user_id:
             # Use existing user
@@ -228,102 +469,6 @@ def GetToken(req: func.HttpRequest) -> func.HttpResponse:
         logging.error(f"Error generating token: {str(e)}")
         return func.HttpResponse(
             json.dumps({"error": f"Failed to generate token: {str(e)}"}),
-            status_code=500,
-            mimetype="application/json"
-        )
-
-@app.route(route="TestMessage", methods=["GET"])
-def TestMessage(req: func.HttpRequest) -> func.HttpResponse:
-    """
-    Test endpoint to check the configured welcome message and voice settings
-    Also shows available endpoints for different call scenarios
-    """
-    logging.info('TestMessage endpoint called')
-    
-    try:
-        response_data = {
-            "welcomeMessage": WELCOME_MESSAGE,
-            "ttsVoice": TTS_VOICE,
-            "targetUserId": TARGET_USER_ID[:20] + "..." if len(TARGET_USER_ID) > 20 else TARGET_USER_ID,
-            "cognitiveServicesEndpoint": COGNITIVE_SERVICES_ENDPOINT,
-            "availableEndpoints": {
-                "MakeTestCall": {
-                    "description": "Creates a direct call to web client (no automatic TTS)",
-                    "usage": "/api/MakeTestCall",
-                    "note": "Call reaches web client immediately. Use /PlayMessage after answering."
-                },
-                "MakeTestCallNoWebhook": {
-                    "description": "Creates call and plays TTS after delay (NO WEBHOOK - MOST RELIABLE)",
-                    "usage": "/api/MakeTestCallNoWebhook?delay=8&message=Custom message&voice=en-US-AriaNeural",
-                    "note": "Best option for client connectivity. No webhook dependencies.",
-                    "parameters": {
-                        "delay": "Seconds to wait before playing TTS (default: 8)",
-                        "message": "Custom message to play (optional)",
-                        "voice": "Custom voice to use (optional)"
-                    }
-                },
-                "MakeTestCallWithAutoTTS": {
-                    "description": "Creates call and plays TTS after delay using threading (WITH WEBHOOK)",
-                    "usage": "/api/MakeTestCallWithAutoTTS?delay=5&message=Custom message&voice=en-US-AriaNeural",
-                    "note": "Uses webhook which may prevent client connection in some cases.",
-                    "parameters": {
-                        "delay": "Seconds to wait before playing TTS (default: 5)",
-                        "message": "Custom message to play (optional)",
-                        "voice": "Custom voice to use (optional)"
-                    }
-                },
-                "MakeTestCallWithWebhookTTS": {
-                    "description": "Creates call and plays TTS via webhook when call connects",
-                    "usage": "/api/MakeTestCallWithWebhookTTS",
-                    "note": "Webhook approach - may block client connection if webhook fails.",
-                    "parameters": {
-                        "message": "Custom message to play (optional)",
-                        "voice": "Custom voice to use (optional)"
-                    }
-                },
-                "PlayMessage": {
-                    "description": "Play TTS on an existing active call",
-                    "usage": "/api/PlayMessage?callId=YOUR_CALL_ID&message=Custom message&voice=en-US-AriaNeural",
-                    "parameters": {
-                        "callId": "Required - Call ID from MakeTestCall response",
-                        "message": "Custom message to play (optional)",
-                        "voice": "Custom voice to use (optional)"
-                    }
-                },
-                "GetToken": {
-                    "description": "Get ACS authentication token for web client",
-                    "usage": "/api/GetToken"
-                },
-                "TestMessage": {
-                    "description": "View current configuration and available endpoints",
-                    "usage": "/api/TestMessage"
-                }
-            },
-            "recommendedFlow": {
-                "step1": "Use MakeTestCallNoWebhook for best client connectivity",
-                "step2": "Alternative: Use MakeTestCall + answer call + PlayMessage for manual control",
-                "step3": "Avoid webhook-based endpoints if client connection is unreliable"
-            }
-        }
-        
-        # Add CORS headers
-        headers = {
-            'Access-Control-Allow-Origin': '*',
-            'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-            'Access-Control-Allow-Headers': 'Content-Type'
-        }
-        
-        return func.HttpResponse(
-            json.dumps(response_data, indent=2),
-            status_code=200,
-            mimetype="application/json",
-            headers=headers
-        )
-        
-    except Exception as e:
-        logging.error(f"Error in TestMessage: {str(e)}")
-        return func.HttpResponse(
-            json.dumps({"error": str(e)}),
             status_code=500,
             mimetype="application/json"
         )
@@ -585,60 +730,6 @@ def MakeTestCallWithAutoTTS(req: func.HttpRequest) -> func.HttpResponse:
              status_code=500
         )
 
-def CallWebhook(req: func.HttpRequest) -> func.HttpResponse:
-    """
-    Basic webhook endpoint to handle call events
-    This is used by MakeTestCall for basic call flow without automatic TTS
-    """
-    logging.info('CallWebhook: Received call event')
-    
-    try:
-        # Get the event data
-        event_data = req.get_body().decode('utf-8')
-        logging.info(f"CallWebhook: Raw event data: {event_data}")
-        
-        # Parse the JSON event
-        events = json.loads(event_data)
-        if not isinstance(events, list):
-            events = [events]
-        
-        for event in events:
-            event_type = event.get('type', 'Unknown')
-            call_connection_id = event.get('data', {}).get('callConnectionId', 'Unknown')
-            
-            logging.info(f"CallWebhook: Processing event type: {event_type}, Call ID: {call_connection_id}")
-            
-            # Log different event types
-            if event_type == 'Microsoft.Communication.CallConnected':
-                logging.info(f"CallWebhook: Call connected! Call ID: {call_connection_id}")
-            elif event_type == 'Microsoft.Communication.CallDisconnected':
-                logging.info(f"CallWebhook: Call disconnected")
-            elif event_type == 'Microsoft.Communication.PlayCompleted':
-                logging.info(f"CallWebhook: Play operation completed")
-            elif event_type == 'Microsoft.Communication.PlayFailed':
-                logging.warning(f"CallWebhook: Play operation failed")
-            else:
-                logging.info(f"CallWebhook: Received event type: {event_type}")
-        
-        return func.HttpResponse(
-            "Webhook processed successfully",
-            status_code=200
-        )
-        
-    except json.JSONDecodeError as json_error:
-        logging.error(f"CallWebhook: Invalid JSON in request body: {str(json_error)}")
-        return func.HttpResponse(
-            "Invalid JSON in request body",
-            status_code=400
-        )
-        
-    except Exception as e:
-        logging.error(f"CallWebhook: Error processing webhook: {str(e)}")
-        return func.HttpResponse(
-            f"Error processing webhook: {str(e)}",
-            status_code=500
-        )
-
 @app.route(route="MakeTestCallWithWebhookTTS", methods=["GET", "POST"])
 def MakeTestCallWithWebhookTTS(req: func.HttpRequest) -> func.HttpResponse:
     """
@@ -824,132 +915,6 @@ def CallWebhookWithAutoTTS(req: func.HttpRequest) -> func.HttpResponse:
             status_code=500
         )
 
-@app.route(route="DebugConfig", methods=["GET"])
-def DebugConfig(req: func.HttpRequest) -> func.HttpResponse:
-    """
-    Debug endpoint to check all configuration values
-    """
-    logging.info('DebugConfig: Configuration check requested')
-    
-    try:
-        config_info = {
-            "acsConnectionString": {
-                "configured": bool(ACS_CONNECTION_STRING),
-                "endpoint": ACS_CONNECTION_STRING.split(';')[0] if ACS_CONNECTION_STRING else "Not configured",
-                "length": len(ACS_CONNECTION_STRING) if ACS_CONNECTION_STRING else 0
-            },
-            "cognitiveServicesEndpoint": {
-                "configured": bool(COGNITIVE_SERVICES_ENDPOINT),
-                "value": COGNITIVE_SERVICES_ENDPOINT,
-                "isEastUS2": "eastus2" in COGNITIVE_SERVICES_ENDPOINT.lower() if COGNITIVE_SERVICES_ENDPOINT else False
-            },
-            "targetUserId": {
-                "configured": bool(TARGET_USER_ID),
-                "value": TARGET_USER_ID[:20] + "..." if len(TARGET_USER_ID) > 20 else TARGET_USER_ID
-            },
-            "callbackUrlBase": {
-                "configured": bool(CALLBACK_URL_BASE),
-                "value": CALLBACK_URL_BASE
-            },
-            "ttsSettings": {
-                "welcomeMessage": WELCOME_MESSAGE[:50] + "..." if len(WELCOME_MESSAGE) > 50 else WELCOME_MESSAGE,
-                "voice": TTS_VOICE
-            },
-            "environmentVariables": {
-                "AZURE_FUNCTIONS_ENVIRONMENT": os.environ.get('AZURE_FUNCTIONS_ENVIRONMENT', 'Not set'),
-                "FUNCTIONS_WORKER_RUNTIME": os.environ.get('FUNCTIONS_WORKER_RUNTIME', 'Not set')
-            }
-        }
-        
-        # Add CORS headers
-        headers = {
-            'Access-Control-Allow-Origin': '*',
-            'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-            'Access-Control-Allow-Headers': 'Content-Type'
-        }
-        
-        return func.HttpResponse(
-            json.dumps(config_info, indent=2),
-            status_code=200,
-            mimetype="application/json",
-            headers=headers
-        )
-        
-    except Exception as e:
-        logging.error(f"DebugConfig: Error: {str(e)}")
-        return func.HttpResponse(
-            json.dumps({"error": str(e)}),
-            status_code=500,
-            mimetype="application/json"
-        )
-
-@app.route(route="TestCognitiveServices", methods=["GET"])
-def TestCognitiveServices(req: func.HttpRequest) -> func.HttpResponse:
-    """
-    Test endpoint to verify Cognitive Services configuration
-    """
-    logging.info('TestCognitiveServices: Testing Cognitive Services configuration')
-    
-    try:
-        # Test different endpoint formats
-        test_endpoints = [
-            COGNITIVE_SERVICES_ENDPOINT,
-            COGNITIVE_SERVICES_ENDPOINT.rstrip('/'),
-            f"{COGNITIVE_SERVICES_ENDPOINT.rstrip('/')}/",
-            "https://eastus2.api.cognitive.microsoft.com",
-            "https://eastus2.api.cognitive.microsoft.com/"
-        ]
-        
-        # Get ACS resource location for comparison
-        acs_endpoint = ACS_CONNECTION_STRING.split(';')[0].replace('endpoint=', '') if ACS_CONNECTION_STRING else ""
-        
-        test_results = {
-            "currentCognitiveServicesEndpoint": COGNITIVE_SERVICES_ENDPOINT,
-            "acsEndpoint": acs_endpoint,
-            "acsRegion": "unitedstates" if "unitedstates" in acs_endpoint else "unknown",
-            "cognitiveServicesRegion": "eastus2" if "eastus2" in COGNITIVE_SERVICES_ENDPOINT else "unknown",
-            "regionMismatch": ("unitedstates" in acs_endpoint and "eastus2" in COGNITIVE_SERVICES_ENDPOINT),
-            "endpointFormats": test_endpoints,
-            "voice": TTS_VOICE,
-            "recommendations": []
-        }
-        
-        # Add recommendations based on analysis
-        if test_results["regionMismatch"]:
-            test_results["recommendations"].append("CRITICAL: Region mismatch detected. ACS is in 'unitedstates' but Cognitive Services is in 'eastus2'. This may cause the bad request error.")
-        
-        if COGNITIVE_SERVICES_ENDPOINT.endswith('/'):
-            test_results["recommendations"].append("Remove trailing slash from Cognitive Services endpoint")
-            
-        if "eastus2" not in COGNITIVE_SERVICES_ENDPOINT:
-            test_results["recommendations"].append("Verify Cognitive Services is in East US 2 region")
-            
-        # Check if voice is valid
-        valid_voices = ["en-US-JennyNeural", "en-US-AriaNeural", "en-US-DavisNeural", "en-US-AmberNeural"]
-        if TTS_VOICE not in valid_voices:
-            test_results["recommendations"].append(f"Voice '{TTS_VOICE}' may not be valid. Try: {', '.join(valid_voices)}")
-        
-        headers = {
-            'Access-Control-Allow-Origin': '*',
-            'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-            'Access-Control-Allow-Headers': 'Content-Type'
-        }
-        
-        return func.HttpResponse(
-            json.dumps(test_results, indent=2),
-            status_code=200,
-            mimetype="application/json",
-            headers=headers
-        )
-        
-    except Exception as e:
-        logging.error(f"TestCognitiveServices: Error: {str(e)}")
-        return func.HttpResponse(
-            json.dumps({"error": str(e)}),
-            status_code=500,
-            mimetype="application/json"
-        )
-
 @app.route(route="MakeTestCallNoWebhook")
 def MakeTestCallNoWebhook(req: func.HttpRequest) -> func.HttpResponse:
     """
@@ -1131,53 +1096,574 @@ def MakeTestCallNoWebhook(req: func.HttpRequest) -> func.HttpResponse:
             headers=headers
         )
 
-@app.route(route="TestWebhook", methods=["GET", "POST"])
-def TestWebhook(req: func.HttpRequest) -> func.HttpResponse:
+# ================================
+# PATIENT MANAGEMENT ENDPOINTS
+# ================================
+
+@app.route(route="patients", methods=["GET", "POST", "OPTIONS"])
+def manage_patients(req: func.HttpRequest) -> func.HttpResponse:
     """
-    Test endpoint to verify webhook connectivity and behavior
+    Patient management endpoint
+    GET: List all patients
+    POST: Create a new patient
     """
-    if req.method == "GET":
-        response_data = {
-            "webhookTestInfo": {
-                "basicWebhook": f"https://{CALLBACK_URL_BASE}/api/CallWebhook",
-                "autoTTSWebhook": f"https://{CALLBACK_URL_BASE}/api/CallWebhookWithAutoTTS",
-                "localWebhook": "http://localhost:7071/api/CallWebhook"
-            },
-            "webhookIssues": {
-                "description": "Webhooks can prevent client connections if they fail",
-                "commonProblems": [
-                    "Webhook URL not publicly accessible",
-                    "Webhook returning errors or timing out"
-                ],
-                "solutions": [
-                    "Use MakeTestCallNoWebhook for best reliability"
-                ]
-            }
+    # Handle CORS preflight requests
+    if req.method == "OPTIONS":
+        headers = {
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type',
+            'Access-Control-Max-Age': '86400'
         }
-    else:
-        logging.info('TestWebhook: Simulating webhook POST request')
-        try:
-            event_data = req.get_body().decode('utf-8')
-            response_data = {
-                "success": True,
-                "message": "Webhook test successful",
-                "receivedData": event_data[:200] + "..." if len(event_data) > 200 else event_data
-            }
-        except Exception as e:
-            response_data = {
-                "success": False,
-                "error": str(e)
-            }
+        return func.HttpResponse("", status_code=200, headers=headers)
     
-    headers = {
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type'
-    }
+    logging.info(f'Patient management: {req.method} request received')
     
-    return func.HttpResponse(
-        json.dumps(response_data, indent=2),
-        status_code=200,
-        mimetype="application/json",
-        headers=headers
-    )
+    # Check if Cosmos DB is configured
+    if not cosmos_manager.is_connected():
+        headers = {
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type'
+        }
+        return func.HttpResponse(
+            json.dumps({"error": "Cosmos DB not configured. Please set COSMOS_CONNECTION_STRING."}),
+            status_code=500,
+            mimetype="application/json",
+            headers=headers
+        )
+    
+    try:
+        if req.method == "GET":
+            # List patients
+            limit = int(req.params.get('limit', 100))
+            
+            # Since we can't use async in Azure Functions v1 model easily, we'll use synchronous methods
+            # In production, consider upgrading to Azure Functions v2 programming model for async support
+            try:
+                # Simulate async call with direct container access
+                query = "SELECT * FROM c ORDER BY c.createdAt DESC"
+                items = list(cosmos_manager.patients_container.query_items(
+                    query=query,
+                    max_item_count=limit,
+                    enable_cross_partition_query=True
+                ))
+                
+                response_data = {
+                    "success": True,
+                    "patients": items,
+                    "count": len(items),
+                    "message": f"Retrieved {len(items)} patients"
+                }
+                
+            except Exception as e:
+                logging.error(f"Error listing patients: {str(e)}")
+                response_data = {
+                    "success": False,
+                    "error": f"Failed to list patients: {str(e)}"
+                }
+                
+        elif req.method == "POST":
+            # Create patient
+            try:
+                patient_data = req.get_json()
+                if not patient_data:
+                    raise Exception("No patient data provided")
+                
+                # Ensure required fields
+                if 'id' not in patient_data:
+                    patient_data['id'] = patient_data.get('patientId', str(int(time.time())))
+                if 'patientId' not in patient_data:
+                    patient_data['patientId'] = patient_data['id']
+                    
+                # Add metadata
+                patient_data['createdAt'] = int(time.time())
+                patient_data['updatedAt'] = int(time.time())
+                
+                # Create patient
+                response = cosmos_manager.patients_container.create_item(body=patient_data)
+                
+                response_data = {
+                    "success": True,
+                    "patient": response,
+                    "message": f"Patient created successfully with ID: {patient_data['id']}"
+                }
+                
+            except Exception as e:
+                logging.error(f"Error creating patient: {str(e)}")
+                response_data = {
+                    "success": False,
+                    "error": f"Failed to create patient: {str(e)}"
+                }
+        
+        headers = {
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type'
+        }
+        
+        status_code = 200 if response_data.get("success") else 400
+        
+        return func.HttpResponse(
+            json.dumps(response_data),
+            status_code=status_code,
+            mimetype="application/json",
+            headers=headers
+        )
+        
+    except Exception as e:
+        logging.error(f"Patient management error: {str(e)}")
+        
+        headers = {
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type'
+        }
+        
+        return func.HttpResponse(
+            json.dumps({"success": False, "error": str(e)}),
+            status_code=500,
+            mimetype="application/json",
+            headers=headers
+        )
+
+@app.route(route="patients/{patient_id}", methods=["GET", "PUT", "DELETE", "OPTIONS"])
+def manage_patient(req: func.HttpRequest) -> func.HttpResponse:
+    """
+    Individual patient management endpoint
+    GET: Get patient by ID
+    PUT: Update patient
+    DELETE: Delete patient
+    """
+    # Handle CORS preflight requests
+    if req.method == "OPTIONS":
+        headers = {
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type',
+            'Access-Control-Max-Age': '86400'
+        }
+        return func.HttpResponse("", status_code=200, headers=headers)
+    
+    patient_id = req.route_params.get('patient_id')
+    logging.info(f'Patient {req.method}: {patient_id}')
+    
+    # Check if Cosmos DB is configured
+    if not cosmos_manager.is_connected():
+        headers = {
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type'
+        }
+        return func.HttpResponse(
+            json.dumps({"error": "Cosmos DB not configured. Please set COSMOS_CONNECTION_STRING."}),
+            status_code=500,
+            mimetype="application/json",
+            headers=headers
+        )
+    
+    try:
+        if req.method == "GET":
+            # Get patient by ID
+            try:
+                response = cosmos_manager.patients_container.read_item(item=patient_id, partition_key=patient_id)
+                response_data = {
+                    "success": True,
+                    "patient": response,
+                    "message": f"Patient retrieved successfully: {patient_id}"
+                }
+            except Exception as e:
+                if "NotFound" in str(e):
+                    response_data = {
+                        "success": False,
+                        "error": f"Patient with ID {patient_id} not found"
+                    }
+                else:
+                    response_data = {
+                        "success": False,
+                        "error": f"Failed to retrieve patient: {str(e)}"
+                    }
+                    
+        elif req.method == "PUT":
+            # Update patient
+            try:
+                updates = req.get_json()
+                if not updates:
+                    raise Exception("No update data provided")
+                
+                # Get existing patient first
+                existing_patient = cosmos_manager.patients_container.read_item(item=patient_id, partition_key=patient_id)
+                
+                # Update fields
+                existing_patient.update(updates)
+                existing_patient['updatedAt'] = int(time.time())
+                
+                response = cosmos_manager.patients_container.replace_item(item=patient_id, body=existing_patient)
+                response_data = {
+                    "success": True,
+                    "patient": response,
+                    "message": f"Patient updated successfully: {patient_id}"
+                }
+                
+            except Exception as e:
+                if "NotFound" in str(e):
+                    response_data = {
+                        "success": False,
+                        "error": f"Patient with ID {patient_id} not found"
+                    }
+                else:
+                    response_data = {
+                        "success": False,
+                        "error": f"Failed to update patient: {str(e)}"
+                    }
+                    
+        elif req.method == "DELETE":
+            # Delete patient
+            try:
+                cosmos_manager.patients_container.delete_item(item=patient_id, partition_key=patient_id)
+                response_data = {
+                    "success": True,
+                    "message": f"Patient deleted successfully: {patient_id}"
+                }
+            except Exception as e:
+                if "NotFound" in str(e):
+                    response_data = {
+                        "success": False,
+                        "error": f"Patient with ID {patient_id} not found"
+                    }
+                else:
+                    response_data = {
+                        "success": False,
+                        "error": f"Failed to delete patient: {str(e)}"
+                    }
+        
+        headers = {
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type'
+        }
+        
+        status_code = 200 if response_data.get("success") else 404
+        
+        return func.HttpResponse(
+            json.dumps(response_data),
+            status_code=status_code,
+            mimetype="application/json",
+            headers=headers
+        )
+        
+    except Exception as e:
+        logging.error(f"Patient management error: {str(e)}")
+        
+        headers = {
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type'
+        }
+        
+        return func.HttpResponse(
+            json.dumps({"success": False, "error": str(e)}),
+            status_code=500,
+            mimetype="application/json",
+            headers=headers
+        )
+
+# ================================
+# APPOINTMENT MANAGEMENT ENDPOINTS
+# ================================
+
+@app.route(route="appointments", methods=["GET", "POST", "OPTIONS"])
+def manage_appointments(req: func.HttpRequest) -> func.HttpResponse:
+    """
+    Appointment management endpoint
+    GET: List appointments (optionally filtered by patient)
+    POST: Create a new appointment
+    """
+    # Handle CORS preflight requests
+    if req.method == "OPTIONS":
+        headers = {
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type',
+            'Access-Control-Max-Age': '86400'
+        }
+        return func.HttpResponse("", status_code=200, headers=headers)
+    
+    logging.info(f'Appointment management: {req.method} request received')
+    
+    # Check if Cosmos DB is configured
+    if not cosmos_manager.is_connected():
+        headers = {
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type'
+        }
+        return func.HttpResponse(
+            json.dumps({"error": "Cosmos DB not configured. Please set COSMOS_CONNECTION_STRING."}),
+            status_code=500,
+            mimetype="application/json",
+            headers=headers
+        )
+    
+    try:
+        if req.method == "GET":
+            # List appointments
+            patient_id = req.params.get('patientId')
+            
+            try:
+                if patient_id:
+                    # Get appointments for specific patient
+                    query = "SELECT * FROM c WHERE c.patientId = @patientId ORDER BY c.appointmentDate ASC"
+                    parameters = [{"name": "@patientId", "value": patient_id}]
+                    
+                    items = list(cosmos_manager.appointments_container.query_items(
+                        query=query,
+                        parameters=parameters,
+                        partition_key=patient_id
+                    ))
+                    message = f"Retrieved {len(items)} appointments for patient {patient_id}"
+                else:
+                    # Get all appointments
+                    query = "SELECT * FROM c ORDER BY c.appointmentDate ASC"
+                    items = list(cosmos_manager.appointments_container.query_items(
+                        query=query,
+                        enable_cross_partition_query=True
+                    ))
+                    message = f"Retrieved {len(items)} appointments"
+                
+                response_data = {
+                    "success": True,
+                    "appointments": items,
+                    "count": len(items),
+                    "message": message
+                }
+                
+            except Exception as e:
+                logging.error(f"Error listing appointments: {str(e)}")
+                response_data = {
+                    "success": False,
+                    "error": f"Failed to list appointments: {str(e)}"
+                }
+                
+        elif req.method == "POST":
+            # Create appointment
+            try:
+                appointment_data = req.get_json()
+                if not appointment_data:
+                    raise Exception("No appointment data provided")
+                
+                # Ensure required fields
+                if 'patientId' not in appointment_data:
+                    raise Exception("patientId is required for appointments")
+                    
+                if 'id' not in appointment_data:
+                    appointment_data['id'] = str(int(time.time() * 1000))  # Unique ID
+                    
+                # Add metadata
+                appointment_data['createdAt'] = int(time.time())
+                appointment_data['updatedAt'] = int(time.time())
+                
+                # Create appointment
+                response = cosmos_manager.appointments_container.create_item(body=appointment_data)
+                
+                response_data = {
+                    "success": True,
+                    "appointment": response,
+                    "message": f"Appointment created successfully with ID: {appointment_data['id']}"
+                }
+                
+            except Exception as e:
+                logging.error(f"Error creating appointment: {str(e)}")
+                response_data = {
+                    "success": False,
+                    "error": f"Failed to create appointment: {str(e)}"
+                }
+        
+        headers = {
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type'
+        }
+        
+        status_code = 200 if response_data.get("success") else 400
+        
+        return func.HttpResponse(
+            json.dumps(response_data),
+            status_code=status_code,
+            mimetype="application/json",
+            headers=headers
+        )
+        
+    except Exception as e:
+        logging.error(f"Appointment management error: {str(e)}")
+        
+        headers = {
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type'
+        }
+        
+        return func.HttpResponse(
+            json.dumps({"success": False, "error": str(e)}),
+            status_code=500,
+            mimetype="application/json",
+            headers=headers
+        )
+
+@app.route(route="appointments/{appointment_id}", methods=["GET", "PUT", "DELETE", "OPTIONS"])
+def manage_appointment(req: func.HttpRequest) -> func.HttpResponse:
+    """
+    Individual appointment management endpoint
+    GET: Get appointment by ID
+    PUT: Update appointment
+    DELETE: Delete appointment
+    """
+    # Handle CORS preflight requests
+    if req.method == "OPTIONS":
+        headers = {
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type',
+            'Access-Control-Max-Age': '86400'
+        }
+        return func.HttpResponse("", status_code=200, headers=headers)
+    
+    appointment_id = req.route_params.get('appointment_id')
+    patient_id = req.params.get('patientId')  # Required for partition key
+    
+    logging.info(f'Appointment {req.method}: {appointment_id}, Patient: {patient_id}')
+    
+    # Check if Cosmos DB is configured
+    if not cosmos_manager.is_connected():
+        headers = {
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type'
+        }
+        return func.HttpResponse(
+            json.dumps({"error": "Cosmos DB not configured. Please set COSMOS_CONNECTION_STRING."}),
+            status_code=500,
+            mimetype="application/json",
+            headers=headers
+        )
+    
+    if not patient_id:
+        headers = {
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type'
+        }
+        return func.HttpResponse(
+            json.dumps({"error": "patientId query parameter is required"}),
+            status_code=400,
+            mimetype="application/json",
+            headers=headers
+        )
+    
+    try:
+        if req.method == "GET":
+            # Get appointment by ID
+            try:
+                response = cosmos_manager.appointments_container.read_item(item=appointment_id, partition_key=patient_id)
+                response_data = {
+                    "success": True,
+                    "appointment": response,
+                    "message": f"Appointment retrieved successfully: {appointment_id}"
+                }
+            except Exception as e:
+                if "NotFound" in str(e):
+                    response_data = {
+                        "success": False,
+                        "error": f"Appointment with ID {appointment_id} not found"
+                    }
+                else:
+                    response_data = {
+                        "success": False,
+                        "error": f"Failed to retrieve appointment: {str(e)}"
+                    }
+                    
+        elif req.method == "PUT":
+            # Update appointment
+            try:
+                updates = req.get_json()
+                if not updates:
+                    raise Exception("No update data provided")
+                
+                # Get existing appointment first
+                existing_appointment = cosmos_manager.appointments_container.read_item(item=appointment_id, partition_key=patient_id)
+                
+                # Update fields
+                existing_appointment.update(updates)
+                existing_appointment['updatedAt'] = int(time.time())
+                
+                response = cosmos_manager.appointments_container.replace_item(item=appointment_id, body=existing_appointment)
+                response_data = {
+                    "success": True,
+                    "appointment": response,
+                    "message": f"Appointment updated successfully: {appointment_id}"
+                }
+                
+            except Exception as e:
+                if "NotFound" in str(e):
+                    response_data = {
+                        "success": False,
+                        "error": f"Appointment with ID {appointment_id} not found"
+                    }
+                else:
+                    response_data = {
+                        "success": False,
+                        "error": f"Failed to update appointment: {str(e)}"
+                    }
+                    
+        elif req.method == "DELETE":
+            # Delete appointment
+            try:
+                cosmos_manager.appointments_container.delete_item(item=appointment_id, partition_key=patient_id)
+                response_data = {
+                    "success": True,
+                    "message": f"Appointment deleted successfully: {appointment_id}"
+                }
+            except Exception as e:
+                if "NotFound" in str(e):
+                    response_data = {
+                        "success": False,
+                        "error": f"Appointment with ID {appointment_id} not found"
+                    }
+                else:
+                    response_data = {
+                        "success": False,
+                        "error": f"Failed to delete appointment: {str(e)}"
+                    }
+        
+        headers = {
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type'
+        }
+        
+        status_code = 200 if response_data.get("success") else 404
+        
+        return func.HttpResponse(
+            json.dumps(response_data),
+            status_code=status_code,
+            mimetype="application/json",
+            headers=headers
+        )
+        
+    except Exception as e:
+        logging.error(f"Appointment management error: {str(e)}")
+        
+        headers = {
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type'
+        }
+        
+        return func.HttpResponse(
+            json.dumps({"success": False, "error": str(e)}),
+            status_code=500,
+            mimetype="application/json",
+            headers=headers
+        )
+
+# ================================
