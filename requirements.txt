@@ -6,3 +6,14 @@ azure-functions
 azure-communication-callautomation
 azure-communication-identity
 azure-cosmos
+
+# Azure Bot Service dependencies
+botbuilder-core>=4.15.0
+botbuilder-schema>=4.15.0
+botframework-connector>=4.15.0
+
+# OpenAI dependencies for bot intelligence
+openai>=1.12.0
+
+# HTTP client library (required by bot framework and OpenAI)
+aiohttp>=3.8.0
