@@ -80,11 +80,11 @@ TTS_VOICE = os.environ.get("TTS_VOICE", "en-US-JennyNeural")
 
 # Azure Bot Service configuration
 BOT_APP_ID = os.environ.get("BOT_APP_ID", "39188ba4-899a-4c87-a7a9-a35b52eb1891")
-BOT_APP_PASSWORD = os.environ.get("BOT_APP_PASSWORD", "jz48Q~VxYZN_uLM6TgypoZbMUxSsHxCX1~oDta7y")
+BOT_APP_PASSWORD = os.environ.get("BOT_APP_PASSWORD", "")
 BOT_SERVICE_ENDPOINT = os.environ.get("BOT_SERVICE_ENDPOINT", "")
 
 # OpenAI configuration for bot intelligence
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "2Xk8IVrD0Nh745tCPUWOhprKdAcMgyCKvUwXpHggf2WnsIHQoFfgJQQJ99BGACHYHv6XJ3w3AAABACOG3Zds")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 OPENAI_ENDPOINT = os.environ.get("OPENAI_ENDPOINT", "https://healthcareagent-openai-ng01.openai.azure.com/")
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 

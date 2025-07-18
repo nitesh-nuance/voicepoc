@@ -128,8 +128,23 @@ obj
 appsettings.json
 local.settings.json
 
+# Security - Environment Variables and Secrets
+.env
+.env.local
+.env.production
+.env.staging
+.env.development
+*.secrets.json
+secrets.json
+deploy-to-existing-function.ps1  # Original script with hardcoded secrets
+.azure/
+
 # Azurite artifacts
 __blobstorage__
 __queuestorage__
 __azurite_db*__.json
 .python_packages
+
+# Deployment scripts with secrets (if any)
+*deploy*secrets*.ps1
+*secrets*deploy*.ps1
