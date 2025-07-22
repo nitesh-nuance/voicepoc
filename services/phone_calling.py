@@ -323,6 +323,7 @@ def handle_pstn_webhook_event(event: Dict[str, Any]) -> bool:
             logging.debug(f"PlayCompleted event data: {json.dumps(play_data, indent=2)}")
             
             # After greeting is played, start listening for user response
+            # Use safe conversation state retrieval to prevent missing state warnings
             if call_connection_id in CONVERSATION_STATE:
                 state = CONVERSATION_STATE[call_connection_id]
                 current_stage = state['stage']
@@ -421,7 +422,38 @@ def handle_pstn_webhook_event(event: Dict[str, Any]) -> bool:
                 else:
                     logging.warning(f"Unknown stage after PlayCompleted: {current_stage}")
             else:
+                # Enhanced: Create missing conversation state instead of just warning
                 logging.warning(f"No conversation state found for call {call_connection_id} after PlayCompleted")
+                logging.info(f"Attempting to recreate conversation state for call {call_connection_id}")
+                
+                # Try to import and use the enhanced conversation state management
+                try:
+                    from services.bot_service import safe_get_conversation_state
+                    enhanced_state = safe_get_conversation_state(call_connection_id, create_if_missing=True)
+                    if enhanced_state:
+                        logging.info(f"Successfully created enhanced conversation state for call {call_connection_id}")
+                        
+                        # Create basic PSTN conversation state to continue the call flow
+                        CONVERSATION_STATE[call_connection_id] = {
+                            'stage': 'listening_for_response',  # Assume we're ready to listen
+                            'target_phone': 'unknown',
+                            'recognition_mode': 'simulation',
+                            'listen_start_time': time.time(),
+                            'turn_count': 0,
+                            'recreated': True  # Flag to indicate this was recreated
+                        }
+                        logging.info(f"Created fallback PSTN conversation state for call {call_connection_id}")
+                    else:
+                        logging.error(f"Failed to create enhanced conversation state for call {call_connection_id}")
+                        
+                except ImportError as e:
+                    logging.error(f"Could not import enhanced conversation state management: {e}")
+                except Exception as e:
+                    logging.error(f"Error creating conversation state for call {call_connection_id}: {e}")
+                
+                # Log available states for debugging
+                logging.debug(f"Current PSTN conversation states: {list(CONVERSATION_STATE.keys())}")
+            
             
         elif event_type == 'Microsoft.Communication.RecognizeCompleted':
             logging.info(f"Speech recognition completed for call {call_connection_id}")

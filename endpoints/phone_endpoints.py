@@ -21,7 +21,7 @@ def register_phone_endpoints(app: func.FunctionApp):
     # Configuration from environment variables
     TARGET_PHONE_NUMBER = os.environ.get("TARGET_PHONE_NUMBER", "+917447474405")
 
-    @app.route(route="make_phone_call_without_bot", methods=["GET", "POST", "OPTIONS"])
+    @app.route(route="make_phone_call", methods=["GET", "POST", "OPTIONS"])
     def make_phone_call(req: func.HttpRequest) -> func.HttpResponse:
         """Create a PSTN call to a phone number with configurable parameters"""
         # Handle CORS preflight requests
@@ -110,7 +110,7 @@ def register_phone_endpoints(app: func.FunctionApp):
                 headers=headers
             )
 
-    @app.route(route="make_phone_call", methods=["GET", "POST", "OPTIONS"])
+    @app.route(route="make_smart_phone_call", methods=["GET", "POST", "OPTIONS"])
     def make_smart_phone_call(req: func.HttpRequest) -> func.HttpResponse:
         """Create a PSTN call with AI-generated greeting message"""
         # Handle CORS preflight requests

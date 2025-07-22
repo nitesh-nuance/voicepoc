@@ -23,9 +23,8 @@ from botframework.connector.auth import MicrosoftAppCredentials
 # OpenAI imports for bot intelligence
 from openai import AzureOpenAI
 
-# Import calling modules
-from .phone_calling import create_pstn_call
-from .voip_calling import create_voip_call
+# NOTE: Removed circular imports to phone_calling and voip_calling
+# These will be imported dynamically when needed to avoid circular dependencies
 
 # Import Phase A and Phase B enhancements
 from bot_config import (
@@ -405,6 +404,9 @@ conversation_workflow_manager = ConversationWorkflowManager()
 
 def get_or_create_enhanced_conversation_state(call_connection_id: str, patient_id: Optional[str] = None) -> EnhancedConversationState:
     """Get existing enhanced conversation state or create new one with patient context"""
+    # Log the request for debugging
+    logging.info(f"Requesting conversation state for call {call_connection_id}, patient: {patient_id}")
+    
     if call_connection_id not in ENHANCED_CONVERSATION_STATES:
         state = EnhancedConversationState(call_connection_id=call_connection_id, patient_id=patient_id)
         
@@ -420,6 +422,11 @@ def get_or_create_enhanced_conversation_state(call_connection_id: str, patient_i
         
         ENHANCED_CONVERSATION_STATES[call_connection_id] = state
         logging.info(f"Created enhanced conversation state for call {call_connection_id}")
+    else:
+        logging.info(f"Retrieved existing conversation state for call {call_connection_id}")
+    
+    # Log current state count for debugging
+    logging.info(f"Total conversation states in memory: {len(ENHANCED_CONVERSATION_STATES)}")
     
     return ENHANCED_CONVERSATION_STATES[call_connection_id]
 
@@ -579,14 +586,22 @@ class CallInitiatorBot:
             Dict with call result information
         """
         try:
+            # Dynamic import to avoid circular dependencies
+            from services.phone_calling import create_pstn_call
+            from services.voip_calling import create_voip_call
+            
             # Determine target and call type
             target_phone = call_request.get('phone_number')
             target_user_id = TARGET_USER_ID
             
+            # Validate phone number if provided
+            if target_phone and not isinstance(target_phone, str):
+                return {'success': False, 'error': 'Invalid phone number format'}
+            
             # Decide whether to make PSTN or VoIP call
             use_pstn = bool(target_phone and target_phone.startswith('+'))
             
-            if use_pstn:
+            if use_pstn and target_phone:
                 # PSTN call to phone number
                 call_result = create_pstn_call(
                     target_phone=target_phone,
@@ -674,7 +689,8 @@ class CallInitiatorBot:
                         temperature=0.7
                     )
                     
-                    return response.choices[0].message.content.strip()
+                    content = response.choices[0].message.content
+                    return content.strip() if content else ""
                     
                 except Exception as openai_error:
                     logging.error(f"OpenAI error: {str(openai_error)}")
@@ -785,13 +801,21 @@ def initiate_call_sync(call_request: dict) -> dict:
         Dict with call result information
     """
     try:
+        # Dynamic import to avoid circular dependencies
+        from services.phone_calling import create_pstn_call
+        from services.voip_calling import create_voip_call
+        
         # Determine target and call type
         target_phone = call_request.get('phone_number')
+        
+        # Validate phone number if provided
+        if target_phone and not isinstance(target_phone, str):
+            return {'success': False, 'error': 'Invalid phone number format'}
         
         # Decide whether to make PSTN or VoIP call
         use_pstn = bool(target_phone and target_phone.startswith('+'))
         
-        if use_pstn:
+        if use_pstn and target_phone:
             # PSTN call to phone number
             call_result = create_pstn_call(
                 target_phone=target_phone,
@@ -875,7 +899,8 @@ def generate_response_sync(user_message: str) -> str:
                     temperature=0.7
                 )
                 
-                return response.choices[0].message.content.strip() or ""
+                content = response.choices[0].message.content
+                return content.strip() if content else ""
                 
             except Exception as openai_error:
                 logging.error(f"OpenAI error: {str(openai_error)}")
@@ -1019,6 +1044,153 @@ def get_or_create_conversation_state(call_connection_id: str, patient_id: Option
         Enhanced conversation state
     """
     return get_or_create_enhanced_conversation_state(call_connection_id, patient_id)
+
+
+def get_conversation_state(call_connection_id: str) -> Optional[EnhancedConversationState]:
+    """
+    Get existing conversation state without creating a new one
+    
+    Args:
+        call_connection_id: Call connection identifier
+    
+    Returns:
+        Enhanced conversation state if exists, None otherwise
+    """
+    state = ENHANCED_CONVERSATION_STATES.get(call_connection_id)
+    if state:
+        logging.info(f"Found existing conversation state for call {call_connection_id}")
+    else:
+        logging.warning(f"No conversation state found for call {call_connection_id}")
+        logging.info(f"Available states: {list(ENHANCED_CONVERSATION_STATES.keys())}")
+    
+    return state
+
+
+def list_active_conversation_states() -> Dict[str, Dict[str, Any]]:
+    """
+    List all active conversation states for debugging
+    
+    Returns:
+        Dictionary with call IDs and their state summaries
+    """
+    states_summary = {}
+    for call_id, state in ENHANCED_CONVERSATION_STATES.items():
+        states_summary[call_id] = {
+            "patient_id": state.patient_id,
+            "active_agent": state.active_agent.value if state.active_agent else None,
+            "adherence_state": state.adherence_state.value if state.adherence_state else None,
+            "turn_count": state.turn_count,
+            "created_at": state.created_at,
+            "last_updated": state.last_updated,
+            "emergency_detected": state.emergency_detected
+        }
+    
+    logging.info(f"Active conversation states: {states_summary}")
+    return states_summary
+
+
+def cleanup_old_conversation_states(max_age_hours: int = 24) -> int:
+    """
+    Clean up old conversation states to prevent memory leaks
+    
+    Args:
+        max_age_hours: Maximum age in hours before cleanup
+    
+    Returns:
+        Number of states cleaned up
+    """
+    import time
+    
+    current_time = time.time()
+    cutoff_time = current_time - (max_age_hours * 3600)
+    
+    states_to_remove = []
+    for call_id, state in ENHANCED_CONVERSATION_STATES.items():
+        if state.last_updated < cutoff_time:
+            states_to_remove.append(call_id)
+    
+    for call_id in states_to_remove:
+        del ENHANCED_CONVERSATION_STATES[call_id]
+        logging.info(f"Cleaned up old conversation state for call {call_id}")
+    
+    if states_to_remove:
+        logging.info(f"Cleaned up {len(states_to_remove)} old conversation states")
+    
+    return len(states_to_remove)
+
+
+def ensure_conversation_state_exists(call_connection_id: str, patient_id: Optional[str] = None) -> EnhancedConversationState:
+    """
+    Ensure conversation state exists and is properly initialized
+    This is specifically to handle cases where PlayCompleted events occur
+    but the conversation state was not found
+    
+    Args:
+        call_connection_id: Call connection identifier
+        patient_id: Optional patient identifier
+    
+    Returns:
+        Enhanced conversation state (guaranteed to exist)
+    """
+    if call_connection_id not in ENHANCED_CONVERSATION_STATES:
+        logging.warning(f"Creating missing conversation state for call {call_connection_id} (possibly due to restart or cleanup)")
+        
+        # Create new state with basic information
+        state = EnhancedConversationState(
+            call_connection_id=call_connection_id, 
+            patient_id=patient_id
+        )
+        
+        # Add a note that this was recreated
+        state.call_metadata['recreated_state'] = True
+        state.call_metadata['recreation_timestamp'] = time.time()
+        
+        ENHANCED_CONVERSATION_STATES[call_connection_id] = state
+        logging.info(f"Recreated conversation state for call {call_connection_id}")
+    
+    return ENHANCED_CONVERSATION_STATES[call_connection_id]
+
+
+def safe_get_conversation_state(call_connection_id: str, create_if_missing: bool = True, patient_id: Optional[str] = None) -> Optional[EnhancedConversationState]:
+    """
+    Safely get conversation state with options for missing state handling
+    
+    Args:
+        call_connection_id: Call connection identifier
+        create_if_missing: Whether to create state if missing
+        patient_id: Optional patient identifier for new states
+    
+    Returns:
+        Enhanced conversation state if found or created, None if not found and not creating
+    """
+    try:
+        state = ENHANCED_CONVERSATION_STATES.get(call_connection_id)
+        
+        if state:
+            # Update last accessed time
+            state.last_updated = time.time()
+            logging.debug(f"Retrieved conversation state for call {call_connection_id}")
+            return state
+        
+        elif create_if_missing:
+            logging.info(f"Creating new conversation state for call {call_connection_id}")
+            return ensure_conversation_state_exists(call_connection_id, patient_id)
+        
+        else:
+            logging.warning(f"No conversation state found for call {call_connection_id} and not creating new one")
+            return None
+            
+    except Exception as e:
+        logging.error(f"Error retrieving conversation state for call {call_connection_id}: {str(e)}")
+        
+        if create_if_missing:
+            try:
+                return ensure_conversation_state_exists(call_connection_id, patient_id)
+            except Exception as create_error:
+                logging.error(f"Failed to create conversation state for call {call_connection_id}: {str(create_error)}")
+                return None
+        
+        return None
 
 
 def get_basic_response_sync(user_message: str) -> str:
