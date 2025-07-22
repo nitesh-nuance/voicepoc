@@ -278,6 +278,7 @@ def handle_pstn_webhook_event(event: Dict[str, Any]) -> bool:
                 
                 # Initialize conversation state for this call
                 CONVERSATION_STATE[call_connection_id] = {
+                    'call_connection_id': call_connection_id,  # Add this for enhanced bot service
                     'stage': 'greeting_played',
                     'turn_count': 0,
                     'conversation_history': [
@@ -322,6 +323,7 @@ def handle_pstn_webhook_event(event: Dict[str, Any]) -> bool:
             logging.debug(f"PlayCompleted event data: {json.dumps(play_data, indent=2)}")
             
             # After greeting is played, start listening for user response
+            # Use safe conversation state retrieval to prevent missing state warnings
             if call_connection_id in CONVERSATION_STATE:
                 state = CONVERSATION_STATE[call_connection_id]
                 current_stage = state['stage']
@@ -420,7 +422,38 @@ def handle_pstn_webhook_event(event: Dict[str, Any]) -> bool:
                 else:
                     logging.warning(f"Unknown stage after PlayCompleted: {current_stage}")
             else:
+                # Enhanced: Create missing conversation state instead of just warning
                 logging.warning(f"No conversation state found for call {call_connection_id} after PlayCompleted")
+                logging.info(f"Attempting to recreate conversation state for call {call_connection_id}")
+                
+                # Try to import and use the enhanced conversation state management
+                try:
+                    from services.bot_service import safe_get_conversation_state
+                    enhanced_state = safe_get_conversation_state(call_connection_id, create_if_missing=True)
+                    if enhanced_state:
+                        logging.info(f"Successfully created enhanced conversation state for call {call_connection_id}")
+                        
+                        # Create basic PSTN conversation state to continue the call flow
+                        CONVERSATION_STATE[call_connection_id] = {
+                            'stage': 'listening_for_response',  # Assume we're ready to listen
+                            'target_phone': 'unknown',
+                            'recognition_mode': 'simulation',
+                            'listen_start_time': time.time(),
+                            'turn_count': 0,
+                            'recreated': True  # Flag to indicate this was recreated
+                        }
+                        logging.info(f"Created fallback PSTN conversation state for call {call_connection_id}")
+                    else:
+                        logging.error(f"Failed to create enhanced conversation state for call {call_connection_id}")
+                        
+                except ImportError as e:
+                    logging.error(f"Could not import enhanced conversation state management: {e}")
+                except Exception as e:
+                    logging.error(f"Error creating conversation state for call {call_connection_id}: {e}")
+                
+                # Log available states for debugging
+                logging.debug(f"Current PSTN conversation states: {list(CONVERSATION_STATE.keys())}")
+            
             
         elif event_type == 'Microsoft.Communication.RecognizeCompleted':
             logging.info(f"Speech recognition completed for call {call_connection_id}")
@@ -1050,13 +1083,94 @@ def _handle_speech_recognition_result(client: CallAutomationClient, call_connect
 
 
 def _generate_conversational_response(user_input: str, conversation_state: dict) -> str:
-    """Generate an appropriate conversational response based on user input"""
+    """Generate an appropriate conversational response based on user input using enhanced bot service"""
     
     logging.debug(f"Generating response for input: '{user_input}'")
     logging.debug(f"Conversation state: Turn {conversation_state['turn_count']}, History length: {len(conversation_state['conversation_history'])}")
     
-    # Simple rule-based responses for healthcare context
-    # In production, integrate with OpenAI or Azure OpenAI for intelligent responses
+    try:
+        # Try to use the enhanced bot service with conversation state management
+        from .bot_service import generate_agent_response_sync, get_or_create_conversation_state
+        
+        # Get call connection ID from conversation state
+        call_connection_id = conversation_state.get('call_connection_id', 'unknown_call')
+        
+        # Get or create enhanced conversation state
+        enhanced_state = get_or_create_conversation_state(call_connection_id)
+        
+        # Sync the turn count and basic history from the existing state
+        if enhanced_state.turn_count < conversation_state['turn_count']:
+            # Update enhanced state to match current conversation
+            enhanced_state.turn_count = conversation_state['turn_count']
+            
+            # Import recent history if enhanced state is behind
+            for entry in conversation_state.get('conversation_history', [])[-3:]:
+                if not enhanced_state.conversation_history or \
+                   entry.get('message') != enhanced_state.conversation_history[-1].message:
+                    enhanced_state.add_turn(
+                        speaker=entry.get('speaker', 'unknown'),
+                        message=entry.get('message', ''),
+                        confidence=entry.get('confidence', 1.0)
+                    )
+        
+        # Generate response using enhanced bot service with agent orchestration
+        bot_response = generate_agent_response_sync(
+            user_input=user_input,
+            call_connection_id=call_connection_id,
+            conversation_state=enhanced_state
+        )
+        
+        if bot_response and bot_response.strip():
+            logging.info(f"Enhanced bot service generated response: '{bot_response[:50]}...'")
+            return bot_response.strip()
+        else:
+            logging.warning("Enhanced bot service returned empty response, falling back to rule-based")
+            
+    except Exception as bot_error:
+        logging.warning(f"Enhanced bot service failed: {str(bot_error)}, falling back to basic bot service")
+        logging.debug(f"Bot error type: {type(bot_error).__name__}")
+        
+        # Fallback to basic bot service
+        try:
+            from .bot_service import generate_response_sync
+            
+            # Create a context-aware message for the basic bot
+            turn_count = conversation_state['turn_count']
+            conversation_history = conversation_state.get('conversation_history', [])
+            
+            # Build context from conversation history
+            context_messages = []
+            for entry in conversation_history[-3:]:  # Last 3 messages for context
+                speaker = entry.get('speaker', 'unknown')
+                message = entry.get('message', '')
+                if speaker == 'user':
+                    context_messages.append(f"Patient: {message}")
+                elif speaker == 'assistant':
+                    context_messages.append(f"Assistant: {message}")
+            
+            # Create enhanced user message with context
+            if context_messages:
+                enhanced_message = f"Conversation context:\n" + "\n".join(context_messages) + f"\n\nCurrent patient input: {user_input}"
+            else:
+                enhanced_message = f"Patient says: {user_input}"
+            
+            logging.debug(f"Enhanced message for basic bot service: '{enhanced_message}'")
+            
+            # Generate response using basic bot service
+            bot_response = generate_response_sync(enhanced_message)
+            
+            if bot_response and bot_response.strip():
+                logging.info(f"Basic bot service generated response: '{bot_response[:50]}...'")
+                return bot_response.strip()
+            else:
+                logging.warning("Basic bot service returned empty response, falling back to rule-based")
+                
+        except Exception as basic_bot_error:
+            logging.warning(f"Basic bot service failed: {str(basic_bot_error)}, falling back to rule-based responses")
+            logging.debug(f"Basic bot error type: {type(basic_bot_error).__name__}")
+    
+    # Fallback to rule-based responses if both bot services fail
+    logging.debug("Using fallback rule-based responses")
     
     user_input_lower = user_input.lower()
     turn_count = conversation_state['turn_count']
@@ -1096,7 +1210,7 @@ def _generate_conversational_response(user_input: str, conversation_state: dict)
         response = "I want to make sure I'm helping you properly. Could you please clarify what type of assistance you're looking for?"
         logging.debug("Using default generic response")
     
-    logging.info(f"Generated response: '{response[:50]}...'")
+    logging.info(f"Generated fallback response: '{response[:50]}...'")
     return response
 
 
@@ -1177,6 +1291,15 @@ def clear_conversation_state(call_connection_id: str):
         
         del CONVERSATION_STATE[call_connection_id]
         logging.info(f"Cleared conversation state for call {call_connection_id}")
+        
+        # Also clear enhanced conversation state from bot service
+        try:
+            from .bot_service import clear_conversation_state as clear_enhanced_state
+            clear_enhanced_state(call_connection_id)
+            logging.debug(f"Cleared enhanced conversation state for call {call_connection_id}")
+        except Exception as e:
+            logging.debug(f"Could not clear enhanced conversation state: {str(e)}")
+            
     else:
         logging.warning(f"No conversation state found to clear for call {call_connection_id}")
         logging.debug(f"Current conversation states: {list(CONVERSATION_STATE.keys())}")

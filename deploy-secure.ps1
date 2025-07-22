@@ -129,6 +129,19 @@ $userResourceGroup = Read-Host "Resource Group Name [$resourceGroup]"
 if ($userFunctionApp) { $functionAppName = $userFunctionApp }
 if ($userResourceGroup) { $resourceGroup = $userResourceGroup }
 
+# Ask user if they want to update environment variables
+Write-Host ""
+Write-Host "Environment Variable Configuration:" -ForegroundColor Yellow
+$updateEnvVars = Read-Host "Do you want to update environment variables in the Function App? [y/N]"
+$shouldUpdateEnvVars = ($updateEnvVars -eq "y" -or $updateEnvVars -eq "Y")
+
+if ($shouldUpdateEnvVars) {
+    Write-Host "✅ Environment variables will be updated during deployment" -ForegroundColor Green
+} else {
+    Write-Host "⚠️  Environment variables will NOT be updated - existing values will be preserved" -ForegroundColor Yellow
+    Write-Host "   Only function code will be deployed" -ForegroundColor Gray
+}
+
 Write-Host ""
 Write-Host "Using Configuration:" -ForegroundColor Yellow
 Write-Host "   Function App: $functionAppName" -ForegroundColor White
@@ -271,39 +284,48 @@ try {
         # Get function app URL
         $functionUrl = "https://$($functionApp.defaultHostName)"
         
-        # Update environment variables automatically
-        Write-Host "[5] Configuring Environment Variables..." -ForegroundColor Cyan
-        
-        # Set the callback URL base first
-        $envVariables["CALLBACK_URL_BASE"] = $functionApp.defaultHostName
-        
-        # Get storage connection string for the function app
-        $storageConnectionString = az functionapp config appsettings list --name $functionAppName --resource-group $resourceGroup --query "[?name=='AzureWebJobsStorage'].value" --output tsv
-        if ($storageConnectionString) {
-            $envVariables["AzureWebJobsStorage"] = $storageConnectionString
-        }
-        
-        # Update all environment variables individually (more secure)
-        $successCount = 0
-        $totalCount = 0
-        foreach ($key in $envVariables.Keys) {
-            if ($envVariables[$key]) {
-                $totalCount++
-                Write-Host "  Setting: $key" -ForegroundColor DarkGray
-                
-                # Use individual setting updates for better security and error handling
-                az functionapp config appsettings set --name $functionAppName --resource-group $resourceGroup --settings "$key=$($envVariables[$key])" --output none
-                
-                if ($LASTEXITCODE -eq 0) {
-                    $successCount++
-                    Write-Host "  ✅ SUCCESS: $key updated" -ForegroundColor Green
-                } else {
-                    Write-Host "  ❌ WARNING: Failed to update $key" -ForegroundColor Yellow
+        # Update environment variables only if user opted in
+        if ($shouldUpdateEnvVars) {
+            Write-Host "[5] Configuring Environment Variables..." -ForegroundColor Cyan
+            
+            # Set the callback URL base first
+            $envVariables["CALLBACK_URL_BASE"] = $functionApp.defaultHostName
+            
+            # Get storage connection string for the function app
+            $storageConnectionString = az functionapp config appsettings list --name $functionAppName --resource-group $resourceGroup --query "[?name=='AzureWebJobsStorage'].value" --output tsv
+            if ($storageConnectionString) {
+                $envVariables["AzureWebJobsStorage"] = $storageConnectionString
+            }
+            
+            # Update all environment variables individually (more secure)
+            $successCount = 0
+            $totalCount = 0
+            foreach ($key in $envVariables.Keys) {
+                if ($envVariables[$key]) {
+                    $totalCount++
+                    Write-Host "  Setting: $key" -ForegroundColor DarkGray
+                    
+                    # Use individual setting updates for better security and error handling
+                    az functionapp config appsettings set --name $functionAppName --resource-group $resourceGroup --settings "$key=$($envVariables[$key])" --output none
+                    
+                    if ($LASTEXITCODE -eq 0) {
+                        $successCount++
+                        Write-Host "  ✅ SUCCESS: $key updated" -ForegroundColor Green
+                    } else {
+                        Write-Host "  ❌ WARNING: Failed to update $key" -ForegroundColor Yellow
+                    }
                 }
             }
+            
+            Write-Host "Environment Variables: $successCount/$totalCount updated successfully" -ForegroundColor Cyan
+        } else {
+            Write-Host "[5] Skipping Environment Variable Configuration (user opted out)" -ForegroundColor Yellow
+            Write-Host "   Existing environment variables in Function App will be preserved" -ForegroundColor Gray
+            Write-Host "   If you need to update them later, you can:" -ForegroundColor Gray
+            Write-Host "   - Run this script again and choose 'y' for environment variables" -ForegroundColor Gray
+            Write-Host "   - Update them manually in the Azure Portal" -ForegroundColor Gray
+            Write-Host "   - Use Azure CLI: az functionapp config appsettings set" -ForegroundColor Gray
         }
-        
-        Write-Host "Environment Variables: $successCount/$totalCount updated successfully" -ForegroundColor Cyan
         
         # Enable CORS for the function app to allow web client access
         Write-Host "[6] Configuring CORS..." -ForegroundColor Cyan
@@ -399,17 +421,29 @@ try {
         Write-Host ""
         Write-Host "POST-DEPLOYMENT STEPS:" -ForegroundColor Yellow
         Write-Host "1. Test the function endpoints using the URLs above" -ForegroundColor White
-        Write-Host "2. Configure your Azure Bot Service with the messaging endpoint" -ForegroundColor White
-        Write-Host "3. Test conversational phone calling features" -ForegroundColor White
-        Write-Host "4. Test the calling functionality with the web clients" -ForegroundColor White
-        Write-Host "5. Verify modular architecture: $functionUrl/api/architecture_info" -ForegroundColor White
+        if ($shouldUpdateEnvVars) {
+            Write-Host "2. Configure your Azure Bot Service with the messaging endpoint" -ForegroundColor White
+            Write-Host "3. Test conversational phone calling features" -ForegroundColor White
+            Write-Host "4. Test the calling functionality with the web clients" -ForegroundColor White
+            Write-Host "5. Verify modular architecture: $functionUrl/api/architecture_info" -ForegroundColor White
+        } else {
+            Write-Host "2. Check and update environment variables if needed (you skipped this step)" -ForegroundColor Yellow
+            Write-Host "3. Configure your Azure Bot Service with the messaging endpoint" -ForegroundColor White
+            Write-Host "4. Test conversational phone calling features" -ForegroundColor White
+            Write-Host "5. Test the calling functionality with the web clients" -ForegroundColor White
+            Write-Host "6. Verify modular architecture: $functionUrl/api/architecture_info" -ForegroundColor White
+        }
         Write-Host ""
         Write-Host "SECURITY IMPROVEMENTS:" -ForegroundColor Green
         Write-Host "✅ No secrets in source code - all externalized to .env file" -ForegroundColor White
         Write-Host "✅ Environment variables masked in deployment logs" -ForegroundColor White
         Write-Host "✅ .env file is excluded from version control" -ForegroundColor White
         Write-Host "✅ Critical secrets validation before deployment" -ForegroundColor White
-        Write-Host "✅ Secure individual environment variable updates" -ForegroundColor White
+        if ($shouldUpdateEnvVars) {
+            Write-Host "✅ Secure individual environment variable updates" -ForegroundColor White
+        } else {
+            Write-Host "⚠️  Environment variables preserved (not updated this deployment)" -ForegroundColor Yellow
+        }
         Write-Host ""
         Write-Host "CONVERSATIONAL AI FEATURES:" -ForegroundColor Magenta
         Write-Host "✅ Speech recognition integration with Azure Cognitive Services" -ForegroundColor White
