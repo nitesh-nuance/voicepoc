@@ -278,6 +278,7 @@ def handle_pstn_webhook_event(event: Dict[str, Any]) -> bool:
                 
                 # Initialize conversation state for this call
                 CONVERSATION_STATE[call_connection_id] = {
+                    'call_connection_id': call_connection_id,  # Add this for enhanced bot service
                     'stage': 'greeting_played',
                     'turn_count': 0,
                     'conversation_history': [
@@ -1050,51 +1051,93 @@ def _handle_speech_recognition_result(client: CallAutomationClient, call_connect
 
 
 def _generate_conversational_response(user_input: str, conversation_state: dict) -> str:
-    """Generate an appropriate conversational response based on user input using bot service"""
+    """Generate an appropriate conversational response based on user input using enhanced bot service"""
     
     logging.debug(f"Generating response for input: '{user_input}'")
     logging.debug(f"Conversation state: Turn {conversation_state['turn_count']}, History length: {len(conversation_state['conversation_history'])}")
     
     try:
-        # Try to use the bot service for intelligent AI responses first
-        from .bot_service import generate_response_sync
+        # Try to use the enhanced bot service with conversation state management
+        from .bot_service import generate_agent_response_sync, get_or_create_conversation_state
         
-        # Create a context-aware message for the bot
-        turn_count = conversation_state['turn_count']
-        conversation_history = conversation_state.get('conversation_history', [])
+        # Get call connection ID from conversation state
+        call_connection_id = conversation_state.get('call_connection_id', 'unknown_call')
         
-        # Build context from conversation history
-        context_messages = []
-        for entry in conversation_history[-3:]:  # Last 3 messages for context
-            speaker = entry.get('speaker', 'unknown')
-            message = entry.get('message', '')
-            if speaker == 'user':
-                context_messages.append(f"Patient: {message}")
-            elif speaker == 'assistant':
-                context_messages.append(f"Assistant: {message}")
+        # Get or create enhanced conversation state
+        enhanced_state = get_or_create_conversation_state(call_connection_id)
         
-        # Create enhanced user message with context
-        if context_messages:
-            enhanced_message = f"Conversation context:\n" + "\n".join(context_messages) + f"\n\nCurrent patient input: {user_input}"
-        else:
-            enhanced_message = f"Patient says: {user_input}"
+        # Sync the turn count and basic history from the existing state
+        if enhanced_state.turn_count < conversation_state['turn_count']:
+            # Update enhanced state to match current conversation
+            enhanced_state.turn_count = conversation_state['turn_count']
+            
+            # Import recent history if enhanced state is behind
+            for entry in conversation_state.get('conversation_history', [])[-3:]:
+                if not enhanced_state.conversation_history or \
+                   entry.get('message') != enhanced_state.conversation_history[-1].message:
+                    enhanced_state.add_turn(
+                        speaker=entry.get('speaker', 'unknown'),
+                        message=entry.get('message', ''),
+                        confidence=entry.get('confidence', 1.0)
+                    )
         
-        logging.debug(f"Enhanced message for bot service: '{enhanced_message}'")
-        
-        # Generate response using bot service (with OpenAI integration)
-        bot_response = generate_response_sync(enhanced_message)
+        # Generate response using enhanced bot service with agent orchestration
+        bot_response = generate_agent_response_sync(
+            user_input=user_input,
+            call_connection_id=call_connection_id,
+            conversation_state=enhanced_state
+        )
         
         if bot_response and bot_response.strip():
-            logging.info(f"Bot service generated response: '{bot_response[:50]}...'")
+            logging.info(f"Enhanced bot service generated response: '{bot_response[:50]}...'")
             return bot_response.strip()
         else:
-            logging.warning("Bot service returned empty response, falling back to rule-based")
+            logging.warning("Enhanced bot service returned empty response, falling back to rule-based")
             
     except Exception as bot_error:
-        logging.warning(f"Bot service failed: {str(bot_error)}, falling back to rule-based responses")
+        logging.warning(f"Enhanced bot service failed: {str(bot_error)}, falling back to basic bot service")
         logging.debug(f"Bot error type: {type(bot_error).__name__}")
+        
+        # Fallback to basic bot service
+        try:
+            from .bot_service import generate_response_sync
+            
+            # Create a context-aware message for the basic bot
+            turn_count = conversation_state['turn_count']
+            conversation_history = conversation_state.get('conversation_history', [])
+            
+            # Build context from conversation history
+            context_messages = []
+            for entry in conversation_history[-3:]:  # Last 3 messages for context
+                speaker = entry.get('speaker', 'unknown')
+                message = entry.get('message', '')
+                if speaker == 'user':
+                    context_messages.append(f"Patient: {message}")
+                elif speaker == 'assistant':
+                    context_messages.append(f"Assistant: {message}")
+            
+            # Create enhanced user message with context
+            if context_messages:
+                enhanced_message = f"Conversation context:\n" + "\n".join(context_messages) + f"\n\nCurrent patient input: {user_input}"
+            else:
+                enhanced_message = f"Patient says: {user_input}"
+            
+            logging.debug(f"Enhanced message for basic bot service: '{enhanced_message}'")
+            
+            # Generate response using basic bot service
+            bot_response = generate_response_sync(enhanced_message)
+            
+            if bot_response and bot_response.strip():
+                logging.info(f"Basic bot service generated response: '{bot_response[:50]}...'")
+                return bot_response.strip()
+            else:
+                logging.warning("Basic bot service returned empty response, falling back to rule-based")
+                
+        except Exception as basic_bot_error:
+            logging.warning(f"Basic bot service failed: {str(basic_bot_error)}, falling back to rule-based responses")
+            logging.debug(f"Basic bot error type: {type(basic_bot_error).__name__}")
     
-    # Fallback to rule-based responses if bot service fails
+    # Fallback to rule-based responses if both bot services fail
     logging.debug("Using fallback rule-based responses")
     
     user_input_lower = user_input.lower()
@@ -1216,6 +1259,15 @@ def clear_conversation_state(call_connection_id: str):
         
         del CONVERSATION_STATE[call_connection_id]
         logging.info(f"Cleared conversation state for call {call_connection_id}")
+        
+        # Also clear enhanced conversation state from bot service
+        try:
+            from .bot_service import clear_conversation_state as clear_enhanced_state
+            clear_enhanced_state(call_connection_id)
+            logging.debug(f"Cleared enhanced conversation state for call {call_connection_id}")
+        except Exception as e:
+            logging.debug(f"Could not clear enhanced conversation state: {str(e)}")
+            
     else:
         logging.warning(f"No conversation state found to clear for call {call_connection_id}")
         logging.debug(f"Current conversation states: {list(CONVERSATION_STATE.keys())}")
