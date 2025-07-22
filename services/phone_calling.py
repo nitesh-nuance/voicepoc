@@ -1050,13 +1050,52 @@ def _handle_speech_recognition_result(client: CallAutomationClient, call_connect
 
 
 def _generate_conversational_response(user_input: str, conversation_state: dict) -> str:
-    """Generate an appropriate conversational response based on user input"""
+    """Generate an appropriate conversational response based on user input using bot service"""
     
     logging.debug(f"Generating response for input: '{user_input}'")
     logging.debug(f"Conversation state: Turn {conversation_state['turn_count']}, History length: {len(conversation_state['conversation_history'])}")
     
-    # Simple rule-based responses for healthcare context
-    # In production, integrate with OpenAI or Azure OpenAI for intelligent responses
+    try:
+        # Try to use the bot service for intelligent AI responses first
+        from .bot_service import generate_response_sync
+        
+        # Create a context-aware message for the bot
+        turn_count = conversation_state['turn_count']
+        conversation_history = conversation_state.get('conversation_history', [])
+        
+        # Build context from conversation history
+        context_messages = []
+        for entry in conversation_history[-3:]:  # Last 3 messages for context
+            speaker = entry.get('speaker', 'unknown')
+            message = entry.get('message', '')
+            if speaker == 'user':
+                context_messages.append(f"Patient: {message}")
+            elif speaker == 'assistant':
+                context_messages.append(f"Assistant: {message}")
+        
+        # Create enhanced user message with context
+        if context_messages:
+            enhanced_message = f"Conversation context:\n" + "\n".join(context_messages) + f"\n\nCurrent patient input: {user_input}"
+        else:
+            enhanced_message = f"Patient says: {user_input}"
+        
+        logging.debug(f"Enhanced message for bot service: '{enhanced_message}'")
+        
+        # Generate response using bot service (with OpenAI integration)
+        bot_response = generate_response_sync(enhanced_message)
+        
+        if bot_response and bot_response.strip():
+            logging.info(f"Bot service generated response: '{bot_response[:50]}...'")
+            return bot_response.strip()
+        else:
+            logging.warning("Bot service returned empty response, falling back to rule-based")
+            
+    except Exception as bot_error:
+        logging.warning(f"Bot service failed: {str(bot_error)}, falling back to rule-based responses")
+        logging.debug(f"Bot error type: {type(bot_error).__name__}")
+    
+    # Fallback to rule-based responses if bot service fails
+    logging.debug("Using fallback rule-based responses")
     
     user_input_lower = user_input.lower()
     turn_count = conversation_state['turn_count']
@@ -1096,7 +1135,7 @@ def _generate_conversational_response(user_input: str, conversation_state: dict)
         response = "I want to make sure I'm helping you properly. Could you please clarify what type of assistance you're looking for?"
         logging.debug("Using default generic response")
     
-    logging.info(f"Generated response: '{response[:50]}...'")
+    logging.info(f"Generated fallback response: '{response[:50]}...'")
     return response
 
 

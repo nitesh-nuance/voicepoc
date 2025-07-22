@@ -475,13 +475,32 @@ def generate_response_sync(user_message: str) -> str:
                     azure_endpoint=OPENAI_ENDPOINT
                 )
                 
+                # Enhanced system prompt for healthcare phone conversations
+                system_prompt = """You are a helpful healthcare assistant handling live phone conversations with patients. 
+
+Key responsibilities:
+- You are speaking directly to a patient who called for healthcare assistance
+- Provide empathetic, professional, and concise responses 
+- Help with appointments, general health questions, and directing calls appropriately
+- Keep responses conversational and under 30 seconds when spoken aloud
+- Use a warm, caring tone appropriate for healthcare interactions
+- If medical advice is needed, recommend they speak with a healthcare professional
+
+Guidelines:
+- Always be supportive and understanding
+- Avoid giving specific medical advice or diagnoses
+- Help patients navigate healthcare services appropriately
+- Keep responses clear and easy to understand over the phone
+- Ask clarifying questions when needed to provide better assistance
+
+Remember: This is a live phone conversation, so keep your responses natural and conversational."""
+                
                 response = client.chat.completions.create(
                     model=OPENAI_MODEL,
                     messages=[
                         {
                             "role": "system",
-                            "content": "You are a helpful healthcare assistant that can make voice calls to patients. "
-                                      "Keep responses concise and helpful."
+                            "content": system_prompt
                         },
                         {
                             "role": "user",
@@ -492,7 +511,8 @@ def generate_response_sync(user_message: str) -> str:
                     temperature=0.7
                 )
                 
-                return response.choices[0].message.content.strip()
+                response_text = response.choices[0].message.content
+                return response_text.strip() if response_text else "I'm sorry, I couldn't generate a response at this time."
                 
             except Exception as openai_error:
                 logging.error(f"OpenAI error: {str(openai_error)}")
@@ -508,6 +528,7 @@ def generate_response_sync(user_message: str) -> str:
 def get_basic_response_sync(user_message: str) -> str:
     """
     Basic response patterns when OpenAI is not available
+    Enhanced for healthcare phone conversations
     
     Args:
         user_message: User's message text
@@ -517,23 +538,39 @@ def get_basic_response_sync(user_message: str) -> str:
     """
     message_lower = user_message.lower()
     
-    if any(word in message_lower for word in ['hello', 'hi', 'hey', 'start']):
-        return ("Hello! I'm your healthcare assistant. I can help you make voice calls to patients, "
-               "manage appointments, and answer healthcare questions. Just ask me to 'call the patient' "
-               "when you need to initiate a voice call.")
+    # Healthcare-specific responses
+    if any(word in message_lower for word in ['appointment', 'book', 'schedule']):
+        return "I'd be happy to help you with scheduling an appointment. What type of appointment do you need?"
+    
+    elif any(word in message_lower for word in ['pain', 'hurt', 'sick', 'feel', 'symptom']):
+        return "I understand you're not feeling well. For medical concerns, I recommend speaking with one of our healthcare professionals who can provide proper guidance."
+    
+    elif any(word in message_lower for word in ['prescription', 'medication', 'medicine', 'refill']):
+        return "For prescription and medication questions, I can help connect you with our pharmacy team. What medication assistance do you need?"
+    
+    elif any(word in message_lower for word in ['emergency', 'urgent']):
+        return "If this is a medical emergency, please hang up and call 911 immediately. For urgent but non-emergency care, I can help you find appropriate assistance."
+    
+    elif any(word in message_lower for word in ['hello', 'hi', 'hey', 'start']):
+        return "Hello! I'm your healthcare assistant. How can I help you today? I can assist with appointments, general questions, or connecting you with the right department."
     
     elif any(word in message_lower for word in ['help', 'what can you do', 'capabilities']):
-        return ("I can help you with:\n- Making voice calls to patients\n- Managing patient appointments\n"
-               "- Accessing patient data\n- Healthcare assistance\n\n"
-               "To make a call, just say 'call the patient' or 'make a voice call'.")
+        return "I can help you with scheduling appointments, answering general healthcare questions, and connecting you with the appropriate department for your needs."
     
-    elif any(word in message_lower for word in ['thank', 'thanks', 'bye', 'goodbye']):
-        return "You're welcome! Feel free to ask me to make calls or help with healthcare tasks anytime."
+    elif any(word in message_lower for word in ['thank', 'thanks']):
+        return "You're very welcome! Is there anything else I can help you with today?"
+    
+    elif any(word in message_lower for word in ['bye', 'goodbye', 'done', "that's all"]):
+        return "Thank you for calling! If you need any assistance in the future, please don't hesitate to reach out. Have a great day!"
+    
+    elif any(word in message_lower for word in ['yes', 'yeah', 'ok', 'okay']):
+        return "Great! How else can I assist you today?"
+    
+    elif any(word in message_lower for word in ['no', 'nothing']):
+        return "No problem at all. If you think of anything else, I'm here to help. Have a wonderful day!"
     
     else:
-        return ("I understand you'd like assistance. I can make voice calls to patients and help with "
-               "healthcare tasks. Try saying 'call the patient' to initiate a voice call, or ask me "
-               "about appointments and patient data.")
+        return "I want to make sure I understand how to help you best. Could you tell me a bit more about what you're looking for assistance with today?"
 
 
 def create_bot_response(incoming_activity: dict, response_text: str) -> dict:
